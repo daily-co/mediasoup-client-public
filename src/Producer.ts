@@ -63,7 +63,7 @@ export type ProducerEvents =
 	];
 	'@setrtpencodingparameters':
 	[
-		RTCRtpEncodingParameters,
+		RTCRtpEncodingParameters | RTCRtpEncodingParameters[],
 		() => void,
 		(error: Error) => void
 	];
@@ -478,7 +478,7 @@ export class Producer extends EnhancedEventEmitter<ProducerEvents>
 	}
 
 	async setRtpEncodingParameters(
-		params: RTCRtpEncodingParameters
+		params: RTCRtpEncodingParameters | RTCRtpEncodingParameters[]
 	): Promise<void>
 	{
 		if (this._closed)
