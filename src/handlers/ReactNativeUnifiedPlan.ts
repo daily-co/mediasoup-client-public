@@ -20,11 +20,7 @@ import {
 import { RemoteSdp } from './sdp/RemoteSdp';
 import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
-import {
-	RtpCapabilities,
-	RtpParameters,
-	RtpEncodingParameters
-} from '../RtpParameters';
+import { RtpCapabilities, RtpParameters } from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
 const logger = new Logger('ReactNativeUnifiedPlan');
@@ -309,14 +305,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
-		if (encodings && encodings.length > 1)
-		{
-			encodings.forEach((encoding: RtpEncodingParameters, idx: number) =>
-			{
-				encoding.rid = `r${idx}`;
-			});
-		}
-
 		const sendingRtpParameters =
 			utils.clone(this._sendingRtpParametersByKind![track.kind], {});
 
@@ -333,12 +321,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
 		const transceiver = this._pc.addTransceiver(
-			track,
-			{
-				direction     : 'sendonly',
-				streams       : [ this._sendStream ],
-				sendEncodings : encodings
-			});
+			track, { direction: 'sendonly', streams: [ this._sendStream ] });
 		let offer = await this._pc.createOffer();
 		let localSdpObject = sdpTransform.parse(offer.sdp);
 		let offerMediaObject;
@@ -352,29 +335,20 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 				});
 		}
 
-		// Special case for VP9 with SVC.
-		let hackVp9Svc = false;
-
 		const layers =
 			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
 
-		if (
-			encodings &&
-			encodings.length === 1 &&
-			layers.spatialLayers > 1 &&
-			sendingRtpParameters.codecs[0].mimeType.toLowerCase() === 'video/vp9'
-		)
+		if (encodings && encodings.length > 1)
 		{
-			logger.debug('send() | enabling legacy simulcast for VP9 SVC');
+			logger.debug('send() | enabling legacy simulcast');
 
-			hackVp9Svc = true;
 			localSdpObject = sdpTransform.parse(offer.sdp);
 			offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
 
 			sdpUnifiedPlanUtils.addLegacySimulcast(
 				{
 					offerMediaObject,
-					numStreams : layers.spatialLayers
+					numStreams : encodings.length
 				});
 
 			offer = { type: 'offer', sdp: sdpTransform.write(localSdpObject) };
@@ -399,31 +373,18 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		sendingRtpParameters.rtcp.cname =
 			sdpCommonUtils.getCname({ offerMediaObject });
 
-		// Set RTP encodings by parsing the SDP offer if no encodings are given.
-		if (!encodings)
-		{
-			sendingRtpParameters.encodings =
-				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
-		}
-		// Set RTP encodings by parsing the SDP offer and complete them with given
-		// one if just a single encoding has been given.
-		else if (encodings.length === 1)
-		{
-			let newEncodings =
-				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+		// Set RTP encodings.
+		sendingRtpParameters.encodings =
+			sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
 
-			Object.assign(newEncodings[0], encodings[0]);
-
-			// Hack for VP9 SVC.
-			if (hackVp9Svc)
-				newEncodings = [ newEncodings[0] ];
-
-			sendingRtpParameters.encodings = newEncodings;
-		}
-		// Otherwise if more than 1 encoding are given use them verbatim.
-		else
+		// Complete encodings with given values.
+		if (encodings)
 		{
-			sendingRtpParameters.encodings = encodings;
+			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
+			{
+				if (encodings[idx])
+					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
+			}
 		}
 
 		// If VP8 or H264 and there is effective simulcast, add scalabilityMode to
