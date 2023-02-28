@@ -94,6 +94,8 @@ export class Chrome55 extends HandlerInterface
 			try { this._pc.close(); }
 			catch (error) {}
 		}
+
+		this.emit('@close');
 	}
 
 	async getNativeRtpCapabilities(): Promise<RtpCapabilities>
@@ -202,29 +204,41 @@ export class Chrome55 extends HandlerInterface
 			},
 			proprietaryConstraints);
 
-		// Handle RTCPeerConnection connection status.
-		this._pc.addEventListener('iceconnectionstatechange', () =>
+		if (this._pc.connectionState)
 		{
-			switch (this._pc.iceConnectionState)
+			this._pc.addEventListener('connectionstatechange', () =>
 			{
-				case 'checking':
-					this.emit('@connectionstatechange', 'connecting');
-					break;
-				case 'connected':
-				case 'completed':
-					this.emit('@connectionstatechange', 'connected');
-					break;
-				case 'failed':
-					this.emit('@connectionstatechange', 'failed');
-					break;
-				case 'disconnected':
-					this.emit('@connectionstatechange', 'disconnected');
-					break;
-				case 'closed':
-					this.emit('@connectionstatechange', 'closed');
-					break;
-			}
-		});
+				this.emit('@connectionstatechange', this._pc.connectionState);
+			});
+		}
+		else
+		{
+			this._pc.addEventListener('iceconnectionstatechange', () =>
+			{
+				logger.warn(
+					'run() | pc.connectionState not supported, using pc.iceConnectionState');
+
+				switch (this._pc.iceConnectionState)
+				{
+					case 'checking':
+						this.emit('@connectionstatechange', 'connecting');
+						break;
+					case 'connected':
+					case 'completed':
+						this.emit('@connectionstatechange', 'connected');
+						break;
+					case 'failed':
+						this.emit('@connectionstatechange', 'failed');
+						break;
+					case 'disconnected':
+						this.emit('@connectionstatechange', 'disconnected');
+						break;
+					case 'closed':
+						this.emit('@connectionstatechange', 'closed');
+						break;
+				}
+			});
+		}
 	}
 
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void>
@@ -295,7 +309,7 @@ export class Chrome55 extends HandlerInterface
 		{ track, encodings, codecOptions, codec }: HandlerSendOptions
 	): Promise<HandlerSendResult>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
@@ -326,7 +340,7 @@ export class Chrome55 extends HandlerInterface
 
 		if (!this._transportReady)
 		{
-			await this._setupTransport(
+			await this.setupTransport(
 				{
 					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 					localSdpObject
@@ -388,7 +402,7 @@ export class Chrome55 extends HandlerInterface
 		{
 			for (const encoding of sendingRtpParameters.encodings)
 			{
-				encoding.scalabilityMode = 'S1T3';
+				encoding.scalabilityMode = 'L1T3';
 			}
 		}
 
@@ -423,7 +437,7 @@ export class Chrome55 extends HandlerInterface
 
 	async stopSending(localId: string): Promise<void>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug('stopSending() [localId:%s]', localId);
 
@@ -474,6 +488,18 @@ export class Chrome55 extends HandlerInterface
 		await this._pc.setRemoteDescription(answer);
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async pauseSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async resumeSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
+	}
+
 	async replaceTrack(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		localId: string, track: MediaStreamTrack | null
@@ -510,7 +536,7 @@ export class Chrome55 extends HandlerInterface
 		}: HandlerSendDataChannelOptions
 	): Promise<HandlerSendDataChannelResult>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		const options =
 		{
@@ -542,7 +568,7 @@ export class Chrome55 extends HandlerInterface
 
 			if (!this._transportReady)
 			{
-				await this._setupTransport(
+				await this.setupTransport(
 					{
 						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 						localSdpObject
@@ -583,25 +609,24 @@ export class Chrome55 extends HandlerInterface
 		optionsList: HandlerReceiveOptions[]
 	) : Promise<HandlerReceiveResult[]>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
 		const results: HandlerReceiveResult[] = [];
 
 		for (const options of optionsList)
 		{
-			const { trackId, kind, rtpParameters } = options;
+			const { trackId, kind, rtpParameters, streamId } = options;
 
 			logger.debug('receive() [trackId:%s, kind:%s]', trackId, kind);
 
 			const mid = kind;
-			const streamId = rtpParameters.rtcp!.cname!;
 
 			this._remoteSdp!.receive(
 				{
 					mid,
 					kind,
 					offerRtpParameters : rtpParameters,
-					streamId,
+					streamId           : streamId || rtpParameters.rtcp!.cname!,
 					trackId
 				});
 		}
@@ -637,7 +662,7 @@ export class Chrome55 extends HandlerInterface
 
 		if (!this._transportReady)
 		{
-			await this._setupTransport(
+			await this.setupTransport(
 				{
 					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 					localSdpObject
@@ -655,7 +680,7 @@ export class Chrome55 extends HandlerInterface
 			const { kind, trackId, rtpParameters } = options;
 			const mid = kind;
 			const localId = trackId;
-			const streamId = rtpParameters.rtcp!.cname!;
+			const streamId = options.streamId || rtpParameters.rtcp!.cname!;
 			const stream = this._pc.getRemoteStreams()
 				.find((s: any) => s.id === streamId);
 			const track = stream.getTrackById(localId);
@@ -672,19 +697,22 @@ export class Chrome55 extends HandlerInterface
 		return results;
 	}
 
-	async stopReceiving(localId: string): Promise<void>
+	async stopReceiving(localIds: string[]): Promise<void>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
-		logger.debug('stopReceiving() [localId:%s]', localId);
+		for (const localId of localIds)
+		{
+			logger.debug('stopReceiving() [localId:%s]', localId);
 
-		const { mid, rtpParameters } = this._mapRecvLocalIdInfo.get(localId) || {};
+			const { mid, rtpParameters } = this._mapRecvLocalIdInfo.get(localId) || {};
 
-		// Remove from the map.
-		this._mapRecvLocalIdInfo.delete(localId);
+			// Remove from the map.
+			this._mapRecvLocalIdInfo.delete(localId);
 
-		this._remoteSdp!.planBStopReceiving(
-			{ mid: mid!, offerRtpParameters: rtpParameters! });
+			this._remoteSdp!.planBStopReceiving(
+				{ mid: mid!, offerRtpParameters: rtpParameters! });
+		}
 
 		const offer = { type: 'offer', sdp: this._remoteSdp!.getSdp() };
 
@@ -702,17 +730,17 @@ export class Chrome55 extends HandlerInterface
 
 		await this._pc.setLocalDescription(answer);
 	}
-	
+
 	async pauseReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
 
 	async resumeReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
@@ -727,7 +755,7 @@ export class Chrome55 extends HandlerInterface
 		{ sctpStreamParameters, label, protocol }: HandlerReceiveDataChannelOptions
 	): Promise<HandlerReceiveDataChannelResult>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
 		const {
 			streamId,
@@ -771,7 +799,7 @@ export class Chrome55 extends HandlerInterface
 			{
 				const localSdpObject = sdpTransform.parse(answer.sdp);
 
-				await this._setupTransport(
+				await this.setupTransport(
 					{
 						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 						localSdpObject
@@ -790,7 +818,7 @@ export class Chrome55 extends HandlerInterface
 		return { dataChannel };
 	}
 
-	private async _setupTransport(
+	private async setupTransport(
 		{
 			localDtlsRole,
 			localSdpObject
@@ -816,12 +844,20 @@ export class Chrome55 extends HandlerInterface
 			localDtlsRole === 'client' ? 'server' : 'client');
 
 		// Need to tell the remote transport about our parameters.
-		await this.safeEmitAsPromise('@connect', { dtlsParameters });
+		await new Promise<void>((resolve, reject) =>
+		{
+			this.safeEmit(
+				'@connect',
+				{ dtlsParameters },
+				resolve,
+				reject
+			);
+		});
 
 		this._transportReady = true;
 	}
 
-	private _assertSendDirection(): void
+	private assertSendDirection(): void
 	{
 		if (this._direction !== 'send')
 		{
@@ -830,7 +866,7 @@ export class Chrome55 extends HandlerInterface
 		}
 	}
 
-	private _assertRecvDirection(): void
+	private assertRecvDirection(): void
 	{
 		if (this._direction !== 'recv')
 		{

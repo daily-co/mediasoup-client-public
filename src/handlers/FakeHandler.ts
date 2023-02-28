@@ -18,7 +18,8 @@ import {
 import {
 	IceParameters,
 	DtlsParameters,
-	DtlsRole
+	DtlsRole,
+	ConnectionState
 } from '../Transport';
 import { RtpCapabilities, RtpParameters } from '../RtpParameters';
 import { SctpCapabilities } from '../SctpParameters';
@@ -64,6 +65,7 @@ class FakeDataChannel extends EnhancedEventEmitter
 	close(): void
 	{
 		this.safeEmit('close');
+		this.emit('@close');
 	}
 
 	send(data: any): void
@@ -77,11 +79,12 @@ class FakeDataChannel extends EnhancedEventEmitter
 	}
 }
 
-export type FakeParameters = {
+export type FakeParameters =
+{
 	generateNativeRtpCapabilities: () => RtpCapabilities;
 	generateNativeSctpCapabilities: () => SctpCapabilities;
 	generateLocalDtlsParameters: () => DtlsParameters;
-}
+};
 
 export class FakeHandler extends HandlerInterface
 {
@@ -126,7 +129,7 @@ export class FakeHandler extends HandlerInterface
 	}
 
 	// NOTE: Custom method for simulation purposes.
-	setConnectionState(connectionState: string): void
+	setConnectionState(connectionState: ConnectionState): void
 	{
 		this.emit('@connectionstatechange', connectionState);
 	}
@@ -201,7 +204,7 @@ export class FakeHandler extends HandlerInterface
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
 		if (!this._transportReady)
-			await this._setupTransport({ localDtlsRole: 'server' });
+			await this.setupTransport({ localDtlsRole: 'server' });
 
 		const rtpParameters =
 			utils.clone(this._rtpParametersByKind![track.kind], {});
@@ -246,6 +249,18 @@ export class FakeHandler extends HandlerInterface
 			throw new Error('local track not found');
 
 		this._tracks.delete(Number(localId));
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async pauseSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async resumeSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
 	}
 
 	async replaceTrack(
@@ -297,7 +312,7 @@ export class FakeHandler extends HandlerInterface
 	): Promise<HandlerSendDataChannelResult>
 	{
 		if (!this._transportReady)
-			await this._setupTransport({ localDtlsRole: 'server' });
+			await this.setupTransport({ localDtlsRole: 'server' });
 
 		logger.debug('sendDataChannel()');
 
@@ -334,7 +349,7 @@ export class FakeHandler extends HandlerInterface
 			const { trackId, kind } = options;
 
 			if (!this._transportReady)
-				await this._setupTransport({ localDtlsRole: 'client' });
+				await this.setupTransport({ localDtlsRole: 'client' });
 
 			logger.debug('receive() [trackId:%s, kind:%s]', trackId, kind);
 
@@ -349,23 +364,26 @@ export class FakeHandler extends HandlerInterface
 		return results;
 	}
 
-	async stopReceiving(localId: string): Promise<void>
+	async stopReceiving(localIds: string[]): Promise<void>
 	{
-		logger.debug('stopReceiving() [localId:%s]', localId);
+		for (const localId of localIds)
+		{
+			logger.debug('stopReceiving() [localId:%s]', localId);
 
-		this._tracks.delete(Number(localId));
+			this._tracks.delete(Number(localId));
+		}
 	}
 
 	async pauseReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
 
 	async resumeReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
@@ -381,7 +399,7 @@ export class FakeHandler extends HandlerInterface
 	): Promise<HandlerReceiveDataChannelResult>
 	{
 		if (!this._transportReady)
-			await this._setupTransport({ localDtlsRole: 'client' });
+			await this.setupTransport({ localDtlsRole: 'client' });
 
 		logger.debug('receiveDataChannel()');
 
@@ -399,7 +417,7 @@ export class FakeHandler extends HandlerInterface
 		return { dataChannel };
 	}
 
-	private async _setupTransport(
+	private async setupTransport(
 		{
 			localDtlsRole,
 			// eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -422,7 +440,7 @@ export class FakeHandler extends HandlerInterface
 		this.emit('@connectionstatechange', 'connecting');
 
 		// Need to tell the remote transport about our parameters.
-		await new Promise((resolve, reject) => (
+		await new Promise<void>((resolve, reject) => (
 			this.emit('@connect', { dtlsParameters }, resolve, reject)
 		));
 

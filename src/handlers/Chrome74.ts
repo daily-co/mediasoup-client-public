@@ -87,6 +87,8 @@ export class Chrome74 extends HandlerInterface
 			try { this._pc.close(); }
 			catch (error) {}
 		}
+
+		this.emit('@close');
 	}
 
 	async getNativeRtpCapabilities(): Promise<RtpCapabilities>
@@ -193,29 +195,41 @@ export class Chrome74 extends HandlerInterface
 			},
 			proprietaryConstraints);
 
-		// Handle RTCPeerConnection connection status.
-		this._pc.addEventListener('iceconnectionstatechange', () =>
+		if (this._pc.connectionState)
 		{
-			switch (this._pc.iceConnectionState)
+			this._pc.addEventListener('connectionstatechange', () =>
 			{
-				case 'checking':
-					this.emit('@connectionstatechange', 'connecting');
-					break;
-				case 'connected':
-				case 'completed':
-					this.emit('@connectionstatechange', 'connected');
-					break;
-				case 'failed':
-					this.emit('@connectionstatechange', 'failed');
-					break;
-				case 'disconnected':
-					this.emit('@connectionstatechange', 'disconnected');
-					break;
-				case 'closed':
-					this.emit('@connectionstatechange', 'closed');
-					break;
-			}
-		});
+				this.emit('@connectionstatechange', this._pc.connectionState);
+			});
+		}
+		else
+		{
+			logger.warn(
+				'run() | pc.connectionState not supported, using pc.iceConnectionState');
+
+			this._pc.addEventListener('iceconnectionstatechange', () =>
+			{
+				switch (this._pc.iceConnectionState)
+				{
+					case 'checking':
+						this.emit('@connectionstatechange', 'connecting');
+						break;
+					case 'connected':
+					case 'completed':
+						this.emit('@connectionstatechange', 'connected');
+						break;
+					case 'failed':
+						this.emit('@connectionstatechange', 'failed');
+						break;
+					case 'disconnected':
+						this.emit('@connectionstatechange', 'disconnected');
+						break;
+					case 'closed':
+						this.emit('@connectionstatechange', 'closed');
+						break;
+				}
+			});
+		}
 	}
 
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void>
@@ -286,7 +300,7 @@ export class Chrome74 extends HandlerInterface
 		{ track, encodings, codecOptions, codec }: HandlerSendOptions
 	): Promise<HandlerSendResult>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
@@ -326,7 +340,7 @@ export class Chrome74 extends HandlerInterface
 
 		if (!this._transportReady)
 		{
-			await this._setupTransport(
+			await this.setupTransport(
 				{
 					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 					localSdpObject
@@ -419,7 +433,14 @@ export class Chrome74 extends HandlerInterface
 		{
 			for (const encoding of sendingRtpParameters.encodings)
 			{
-				encoding.scalabilityMode = 'S1T3';
+				if (encoding.scalabilityMode)
+				{
+					encoding.scalabilityMode = `L1T${layers.temporalLayers}`;
+				}
+				else
+				{
+					encoding.scalabilityMode = 'L1T3';
+				}
 			}
 		}
 
@@ -453,7 +474,7 @@ export class Chrome74 extends HandlerInterface
 
 	async stopSending(localId: string): Promise<void>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug('stopSending() [localId:%s]', localId);
 
@@ -463,8 +484,21 @@ export class Chrome74 extends HandlerInterface
 			throw new Error('associated RTCRtpTransceiver not found');
 
 		transceiver.sender.replaceTrack(null);
+
 		this._pc.removeTrack(transceiver.sender);
-		this._remoteSdp!.closeMediaSection(transceiver.mid!);
+
+		const mediaSectionClosed =
+			this._remoteSdp!.closeMediaSection(transceiver.mid!);
+
+		if (mediaSectionClosed)
+		{
+			try
+			{
+				transceiver.stop();
+			}
+			catch (error)
+			{}
+		}
 
 		const offer = await this._pc.createOffer();
 
@@ -485,11 +519,74 @@ export class Chrome74 extends HandlerInterface
 		this._mapMidTransceiver.delete(localId);
 	}
 
+	async pauseSending(localId: string): Promise<void>
+	{
+		this.assertSendDirection();
+
+		logger.debug('pauseSending() [localId:%s]', localId);
+
+		const transceiver = this._mapMidTransceiver.get(localId);
+
+		if (!transceiver)
+			throw new Error('associated RTCRtpTransceiver not found');
+
+		transceiver.direction = 'inactive';
+		this._remoteSdp!.pauseMediaSection(localId);
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'pauseSending() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'pauseSending() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
+	}
+
+	async resumeSending(localId: string): Promise<void>
+	{
+		this.assertSendDirection();
+
+		logger.debug('resumeSending() [localId:%s]', localId);
+
+		const transceiver = this._mapMidTransceiver.get(localId);
+
+		this._remoteSdp!.resumeSendingMediaSection(localId);
+
+		if (!transceiver)
+			throw new Error('associated RTCRtpTransceiver not found');
+
+		transceiver.direction = 'sendonly';
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'resumeSending() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'resumeSending() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
+	}
+
 	async replaceTrack(
 		localId: string, track: MediaStreamTrack | null
 	): Promise<void>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		if (track)
 		{
@@ -511,7 +608,7 @@ export class Chrome74 extends HandlerInterface
 
 	async setMaxSpatialLayer(localId: string, spatialLayer: number): Promise<void>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug(
 			'setMaxSpatialLayer() [localId:%s, spatialLayer:%s]',
@@ -533,11 +630,29 @@ export class Chrome74 extends HandlerInterface
 		});
 
 		await transceiver.sender.setParameters(parameters);
+
+		this._remoteSdp!.muxMediaSectionSimulcast(localId, parameters.encodings);
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'setMaxSpatialLayer() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'setMaxSpatialLayer() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
 	}
 
 	async setRtpEncodingParameters(localId: string, params: any): Promise<void>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		logger.debug(
 			'setRtpEncodingParameters() [localId:%s, params:%o]',
@@ -556,11 +671,29 @@ export class Chrome74 extends HandlerInterface
 		});
 
 		await transceiver.sender.setParameters(parameters);
+
+		this._remoteSdp!.muxMediaSectionSimulcast(localId, parameters.encodings);
+
+		const offer = await this._pc.createOffer();
+
+		logger.debug(
+			'setRtpEncodingParameters() | calling pc.setLocalDescription() [offer:%o]',
+			offer);
+
+		await this._pc.setLocalDescription(offer);
+
+		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
+
+		logger.debug(
+			'setRtpEncodingParameters() | calling pc.setRemoteDescription() [answer:%o]',
+			answer);
+
+		await this._pc.setRemoteDescription(answer);
 	}
 
 	async getSenderStats(localId: string): Promise<RTCStatsReport>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
@@ -580,7 +713,7 @@ export class Chrome74 extends HandlerInterface
 		}: HandlerSendDataChannelOptions
 	): Promise<HandlerSendDataChannelResult>
 	{
-		this._assertSendDirection();
+		this.assertSendDirection();
 
 		const options =
 		{
@@ -611,7 +744,7 @@ export class Chrome74 extends HandlerInterface
 
 			if (!this._transportReady)
 			{
-				await this._setupTransport(
+				await this.setupTransport(
 					{
 						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 						localSdpObject
@@ -652,14 +785,14 @@ export class Chrome74 extends HandlerInterface
 		optionsList: HandlerReceiveOptions[]
 	) : Promise<HandlerReceiveResult[]>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
 		const results: HandlerReceiveResult[] = [];
 		const mapLocalId: Map<string, string> = new Map();
 
 		for (const options of optionsList)
 		{
-			const { trackId, kind, rtpParameters } = options;
+			const { trackId, kind, rtpParameters, streamId } = options;
 
 			logger.debug('receive() [trackId:%s, kind:%s]', trackId, kind);
 
@@ -672,7 +805,7 @@ export class Chrome74 extends HandlerInterface
 					mid                : localId,
 					kind,
 					offerRtpParameters : rtpParameters,
-					streamId           : rtpParameters.rtcp!.cname!,
+					streamId           : streamId || rtpParameters.rtcp!.cname!,
 					trackId
 				});
 		}
@@ -708,7 +841,7 @@ export class Chrome74 extends HandlerInterface
 
 		if (!this._transportReady)
 		{
-			await this._setupTransport(
+			await this.setupTransport(
 				{
 					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 					localSdpObject
@@ -748,18 +881,21 @@ export class Chrome74 extends HandlerInterface
 		return results;
 	}
 
-	async stopReceiving(localId: string): Promise<void>
+	async stopReceiving(localIds: string[]): Promise<void>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
-		logger.debug('stopReceiving() [localId:%s]', localId);
+		for (const localId of localIds)
+		{
+			logger.debug('stopReceiving() [localId:%s]', localId);
 
-		const transceiver = this._mapMidTransceiver.get(localId);
+			const transceiver = this._mapMidTransceiver.get(localId);
 
-		if (!transceiver)
-			throw new Error('associated RTCRtpTransceiver not found');
+			if (!transceiver)
+				throw new Error('associated RTCRtpTransceiver not found');
 
-		this._remoteSdp!.closeMediaSection(transceiver.mid!);
+			this._remoteSdp!.closeMediaSection(transceiver.mid!);
+		}
 
 		const offer = { type: 'offer', sdp: this._remoteSdp!.getSdp() };
 
@@ -777,22 +913,29 @@ export class Chrome74 extends HandlerInterface
 
 		await this._pc.setLocalDescription(answer);
 
-		this._mapMidTransceiver.delete(localId);
+		for (const localId of localIds)
+		{
+			this._mapMidTransceiver.delete(localId);
+		}
 	}
 
-	async pauseReceiving(localId: string): Promise<void>
+	async pauseReceiving(localIds: string[]): Promise<void>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
-		logger.debug('pauseReceiving() [localId:%s]', localId);
+		for (const localId of localIds)
+		{
+			logger.debug('pauseReceiving() [localId:%s]', localId);
 
-		const transceiver = this._mapMidTransceiver.get(localId);
+			const transceiver = this._mapMidTransceiver.get(localId);
 
-		if (!transceiver)
-			throw new Error('associated RTCRtpTransceiver not found');
+			if (!transceiver)
+				throw new Error('associated RTCRtpTransceiver not found');
 
-		transceiver.direction = 'inactive';
-		
+			transceiver.direction = 'inactive';
+			this._remoteSdp!.pauseMediaSection(localId);
+		}
+
 		const offer = { type: 'offer', sdp: this._remoteSdp!.getSdp() };
 
 		logger.debug(
@@ -810,19 +953,23 @@ export class Chrome74 extends HandlerInterface
 		await this._pc.setLocalDescription(answer);
 	}
 
-	async resumeReceiving(localId: string): Promise<void>
+	async resumeReceiving(localIds: string[]): Promise<void>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
-		logger.debug('resumeReceiving() [localId:%s]', localId);
+		for (const localId of localIds)
+		{
+			logger.debug('resumeReceiving() [localId:%s]', localId);
 
-		const transceiver = this._mapMidTransceiver.get(localId);
+			const transceiver = this._mapMidTransceiver.get(localId);
 
-		if (!transceiver)
-			throw new Error('associated RTCRtpTransceiver not found');
+			if (!transceiver)
+				throw new Error('associated RTCRtpTransceiver not found');
 
-		transceiver.direction = 'recvonly';
-		
+			transceiver.direction = 'recvonly';
+			this._remoteSdp!.resumeReceivingMediaSection(localId);
+		}
+
 		const offer = { type: 'offer', sdp: this._remoteSdp!.getSdp() };
 
 		logger.debug(
@@ -842,7 +989,7 @@ export class Chrome74 extends HandlerInterface
 
 	async getReceiverStats(localId: string): Promise<RTCStatsReport>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
@@ -856,7 +1003,7 @@ export class Chrome74 extends HandlerInterface
 		{ sctpStreamParameters, label, protocol }: HandlerReceiveDataChannelOptions
 	): Promise<HandlerReceiveDataChannelResult>
 	{
-		this._assertRecvDirection();
+		this.assertRecvDirection();
 
 		const {
 			streamId,
@@ -899,7 +1046,7 @@ export class Chrome74 extends HandlerInterface
 			{
 				const localSdpObject = sdpTransform.parse(answer.sdp);
 
-				await this._setupTransport(
+				await this.setupTransport(
 					{
 						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
 						localSdpObject
@@ -918,7 +1065,7 @@ export class Chrome74 extends HandlerInterface
 		return { dataChannel };
 	}
 
-	private async _setupTransport(
+	private async setupTransport(
 		{
 			localDtlsRole,
 			localSdpObject
@@ -944,12 +1091,20 @@ export class Chrome74 extends HandlerInterface
 			localDtlsRole === 'client' ? 'server' : 'client');
 
 		// Need to tell the remote transport about our parameters.
-		await this.safeEmitAsPromise('@connect', { dtlsParameters });
+		await new Promise<void>((resolve, reject) =>
+		{
+			this.safeEmit(
+				'@connect',
+				{ dtlsParameters },
+				resolve,
+				reject
+			);
+		});
 
 		this._transportReady = true;
 	}
 
-	private _assertSendDirection(): void
+	private assertSendDirection(): void
 	{
 		if (this._direction !== 'send')
 		{
@@ -958,7 +1113,7 @@ export class Chrome74 extends HandlerInterface
 		}
 	}
 
-	private _assertRecvDirection(): void
+	private assertRecvDirection(): void
 	{
 		if (this._direction !== 'recv')
 		{

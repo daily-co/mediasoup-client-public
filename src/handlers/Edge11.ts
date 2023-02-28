@@ -102,6 +102,8 @@ export class Edge11 extends HandlerInterface
 			try { (rtpReceiver as any).stop(); }
 			catch (error) {}
 		}
+
+		this.emit('@close');
 	}
 
 	async getNativeRtpCapabilities(): Promise<RtpCapabilities>
@@ -148,9 +150,9 @@ export class Edge11 extends HandlerInterface
 		this._remoteDtlsParameters = dtlsParameters;
 		this._cname = `CNAME-${utils.generateRandomNumber()}`;
 
-		this._setIceGatherer({ iceServers, iceTransportPolicy });
-		this._setIceTransport();
-		this._setDtlsTransport();
+		this.setIceGatherer({ iceServers, iceTransportPolicy });
+		this.setIceTransport();
+		this.setDtlsTransport();
 	}
 
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -195,7 +197,7 @@ export class Edge11 extends HandlerInterface
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
 		if (!this._transportReady)
-			await this._setupTransport({ localDtlsRole: 'server' });
+			await this.setupTransport({ localDtlsRole: 'server' });
 
 		logger.debug('send() | calling new RTCRtpSender()');
 
@@ -272,6 +274,18 @@ export class Edge11 extends HandlerInterface
 
 			throw error;
 		}
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async pauseSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
+	}
+
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	async resumeSending(localId: string): Promise<void>
+	{
+		// Unimplemented.
 	}
 
 	async replaceTrack(
@@ -374,7 +388,7 @@ export class Edge11 extends HandlerInterface
 		}
 
 		if (!this._transportReady)
-			await this._setupTransport({ localDtlsRole: 'server' });
+			await this.setupTransport({ localDtlsRole: 'server' });
 
 		for (const options of optionsList)
 		{
@@ -415,39 +429,42 @@ export class Edge11 extends HandlerInterface
 		return results;
 	}
 
-	async stopReceiving(localId: string): Promise<void>
+	async stopReceiving(localIds: string[]): Promise<void>
 	{
-		logger.debug('stopReceiving() [localId:%s]', localId);
-
-		const rtpReceiver = this._rtpReceivers.get(localId);
-
-		if (!rtpReceiver)
-			throw new Error('RTCRtpReceiver not found');
-
-		this._rtpReceivers.delete(localId);
-
-		try
+		for (const localId of localIds)
 		{
-			logger.debug('stopReceiving() | calling rtpReceiver.stop()');
+			logger.debug('stopReceiving() [localId:%s]', localId);
 
-			(rtpReceiver as any).stop();
-		}
-		catch (error)
-		{
-			logger.warn('stopReceiving() | rtpReceiver.stop() failed:%o', error);
+			const rtpReceiver = this._rtpReceivers.get(localId);
+
+			if (!rtpReceiver)
+				throw new Error('RTCRtpReceiver not found');
+
+			this._rtpReceivers.delete(localId);
+
+			try
+			{
+				logger.debug('stopReceiving() | calling rtpReceiver.stop()');
+
+				(rtpReceiver as any).stop();
+			}
+			catch (error)
+			{
+				logger.warn('stopReceiving() | rtpReceiver.stop() failed:%o', error);
+			}
 		}
 	}
 
 	async pauseReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
 
 	async resumeReceiving(
 		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		localId: string): Promise<void>
+		localIds: string[]): Promise<void>
 	{
 		// Unimplemented.
 	}
@@ -470,7 +487,7 @@ export class Edge11 extends HandlerInterface
 		throw new UnsupportedError('not implemented');
 	}
 
-	private _setIceGatherer(
+	private setIceGatherer(
 		{ iceServers, iceTransportPolicy }:
 		{ iceServers?: any[]; iceTransportPolicy?: RTCIceTransportPolicy }
 	): void
@@ -495,14 +512,14 @@ export class Edge11 extends HandlerInterface
 		catch (error)
 		{
 			logger.debug(
-				'_setIceGatherer() | iceGatherer.gather() failed: %s',
+				'setIceGatherer() | iceGatherer.gather() failed: %s',
 				(error as Error).toString());
 		}
 
 		this._iceGatherer = iceGatherer;
 	}
 
-	private _setIceTransport(): void
+	private setIceTransport(): void
 	{
 		const iceTransport = new (RTCIceTransport as any)(this._iceGatherer);
 
@@ -563,7 +580,7 @@ export class Edge11 extends HandlerInterface
 		this._iceTransport = iceTransport;
 	}
 
-	private _setDtlsTransport(): void
+	private setDtlsTransport(): void
 	{
 		const dtlsTransport = new (RTCDtlsTransport as any)(this._iceTransport);
 
@@ -592,12 +609,12 @@ export class Edge11 extends HandlerInterface
 		this._dtlsTransport = dtlsTransport;
 	}
 
-	private async _setupTransport(
+	private async setupTransport(
 		{ localDtlsRole }:
 		{ localDtlsRole: DtlsRole }
 	): Promise<void>
 	{
-		logger.debug('_setupTransport()');
+		logger.debug('setupTransport()');
 
 		// Get our local DTLS parameters.
 		const dtlsParameters = this._dtlsTransport.getLocalParameters();
@@ -605,7 +622,15 @@ export class Edge11 extends HandlerInterface
 		dtlsParameters.role = localDtlsRole;
 
 		// Need to tell the remote transport about our parameters.
-		await this.safeEmitAsPromise('@connect', { dtlsParameters });
+		await new Promise<void>((resolve, reject) =>
+		{
+			this.safeEmit(
+				'@connect',
+				{ dtlsParameters },
+				resolve,
+				reject
+			);
+		});
 
 		// Start the RTCIceTransport.
 		this._iceTransport.start(

@@ -268,30 +268,44 @@ export class RemoteSdp
 		}
 	}
 
+	pauseMediaSection(mid: string): void
+	{
+		const mediaSection = this._findMediaSection(mid);
+
+		mediaSection.pause();
+	}
+
+	resumeSendingMediaSection(mid: string): void
+	{
+		const mediaSection = this._findMediaSection(mid);
+
+		mediaSection.resume();
+	}
+
+	resumeReceivingMediaSection(mid: string): void
+	{
+		const mediaSection = this._findMediaSection(mid);
+
+		mediaSection.resume();
+	}
+
 	disableMediaSection(mid: string): void
 	{
-		const idx = this._midToIndex.get(mid);
-
-		if (idx === undefined)
-		{
-			throw new Error(`no media section found with mid '${mid}'`);
-		}
-
-		const mediaSection = this._mediaSections[idx];
+		const mediaSection = this._findMediaSection(mid);
 
 		mediaSection.disable();
 	}
 
-	closeMediaSection(mid: string): void
+	/**
+	 * Closes media section. Returns true if the given MID corresponds to a m
+	 * section that has been indeed closed. False otherwise.
+	 *
+	 * NOTE: Closing the first m section is a pain since it invalidates the bundled
+	 * transport, so instead closing it we just disable it.
+	 */
+	closeMediaSection(mid: string): boolean
 	{
-		const idx = this._midToIndex.get(mid);
-
-		if (idx === undefined)
-		{
-			throw new Error(`no media section found with mid '${mid}'`);
-		}
-
-		const mediaSection = this._mediaSections[idx];
+		const mediaSection = this._findMediaSection(mid);
 
 		// NOTE: Closing the first m section is a pain since it invalidates the
 		// bundled transport, so let's avoid it.
@@ -303,13 +317,26 @@ export class RemoteSdp
 
 			this.disableMediaSection(mid);
 
-			return;
+			return false;
 		}
 
 		mediaSection.close();
 
 		// Regenerate BUNDLE mids.
 		this._regenerateBundleMids();
+
+		return true;
+	}
+
+	muxMediaSectionSimulcast(
+		mid: string, encodings: RTCRtpEncodingParameters[]
+	): void
+	{
+		const mediaSection = this._findMediaSection(mid) as AnswerMediaSection;
+
+		mediaSection.muxSimulcastStreams(encodings);
+
+		this._replaceMediaSection(mediaSection);
 	}
 
 	planBStopReceiving(
@@ -323,16 +350,10 @@ export class RemoteSdp
 		}
 	): void
 	{
-		const idx = this._midToIndex.get(mid);
-
-		if (idx === undefined)
-		{
-			throw new Error(`no media section found with mid '${mid}'`);
-		}
-
-		const mediaSection = this._mediaSections[idx] as OfferMediaSection;
+		const mediaSection = this._findMediaSection(mid) as OfferMediaSection;
 
 		mediaSection.planBStopReceiving({ offerRtpParameters });
+
 		this._replaceMediaSection(mediaSection);
 	}
 
@@ -440,6 +461,18 @@ export class RemoteSdp
 			// Update the SDP object.
 			this._sdpObject.media[idx] = newMediaSection.getObject();
 		}
+	}
+
+	_findMediaSection(mid: string): MediaSection
+	{
+		const idx = this._midToIndex.get(mid);
+
+		if (idx === undefined)
+		{
+			throw new Error(`no media section found with mid '${mid}'`);
+		}
+
+		return this._mediaSections[idx];
 	}
 
 	_regenerateBundleMids(): void
