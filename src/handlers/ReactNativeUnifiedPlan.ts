@@ -20,7 +20,11 @@ import {
 import { RemoteSdp } from './sdp/RemoteSdp';
 import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
-import { RtpCapabilities, RtpParameters } from '../RtpParameters';
+import {
+	RtpCapabilities,
+	RtpParameters,
+	RtpEncodingParameters
+} from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
 const logger = new Logger('ReactNativeUnifiedPlan');
@@ -305,6 +309,23 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
+		// Mediasoup currently has no dependency on React Native.
+		// And this is supposed to be a temporary fix, until the Mediasoup bug is fixed.
+		// Opened issue, Unable to send video from iOS:
+		// https://github.com/versatica/mediasoup-client/issues/251
+		// @ts-ignore
+		const isIOS = window?.DailyNativeUtils?.platform?.OS === 'ios';
+
+		logger.debug('isIOS', isIOS);
+
+		if (!isIOS && encodings && encodings.length > 1)
+		{
+			encodings.forEach((encoding: RtpEncodingParameters, idx: number) =>
+			{
+				encoding.rid = `r${idx}`;
+			});
+		}
+
 		const sendingRtpParameters =
 			utils.clone(this._sendingRtpParametersByKind![track.kind], {});
 
@@ -321,7 +342,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
 		const transceiver = this._pc.addTransceiver(
-			track, { direction: 'sendonly', streams: [ this._sendStream ] });
+			track,
+			{
+				direction     : 'sendonly',
+				streams       : [ this._sendStream ],
+				sendEncodings : !isIOS ? encodings : undefined
+			});
 		let offer = await this._pc.createOffer();
 		let localSdpObject = sdpTransform.parse(offer.sdp);
 		let offerMediaObject;
@@ -338,7 +364,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		const layers =
 			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
 
-		if (encodings && encodings.length > 1)
+		if (isIOS && encodings && encodings.length > 1)
 		{
 			logger.debug('send() | enabling legacy simulcast');
 
@@ -373,17 +399,38 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		sendingRtpParameters.rtcp.cname =
 			sdpCommonUtils.getCname({ offerMediaObject });
 
-		// Set RTP encodings.
-		sendingRtpParameters.encodings =
-			sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
-
-		// Complete encodings with given values.
-		if (encodings)
+		// Set RTP encodings by parsing the SDP offer if no encodings are given.
+		if (!encodings)
 		{
-			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
+			sendingRtpParameters.encodings =
+				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+		}
+		// Set RTP encodings by parsing the SDP offer and complete them with given
+		// one if just a single encoding has been given.
+		else if (encodings.length === 1)
+		{
+			let newEncodings =
+				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+
+			Object.assign(newEncodings[0], encodings[0]);
+
+			sendingRtpParameters.encodings = newEncodings;
+		}
+		// Otherwise if more than 1 encoding are given use them verbatim.
+		else
+		{
+			if (isIOS)
 			{
-				if (encodings[idx])
-					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
+				sendingRtpParameters.encodings =
+					sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+				for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
+				{
+					if (encodings[idx])
+						Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
+				}
+			}
+			else {
+				sendingRtpParameters.encodings = encodings;
 			}
 		}
 
