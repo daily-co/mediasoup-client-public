@@ -386,12 +386,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		await this._pc.setLocalDescription(offer);
 
-		// We can now get the transceiver.mid.
-		const localId = transceiver.mid;
-
-		// Set MID.
-		sendingRtpParameters.mid = localId;
-
 		localSdpObject = sdpTransform.parse(this._pc.localDescription.sdp);
 		offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
 
@@ -474,6 +468,10 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 			answer);
 
 		await this._pc.setRemoteDescription(answer);
+
+		// We can now get the transceiver.mid. That is only possible after the negotiation is completed
+		// More details here: https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpTransceiver/mid
+		const localId = transceiver.mid;
 
 		// Store in the map.
 		this._mapMidTransceiver.set(localId, transceiver);
