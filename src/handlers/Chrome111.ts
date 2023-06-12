@@ -306,33 +306,6 @@ export class Chrome111 extends HandlerInterface
 			{
 				encoding.rid = `r${idx}`;
 			});
-
-			// Set rid and verify scalabilityMode in each encoding.
-			// NOTE: Even if WebRTC allows different scalabilityMode (different number
-			// of temporal layers) per simulcast stream, we need that those are the
-			// same in all them, so let's pick up the highest value.
-			// NOTE: If scalabilityMode is not given, Chrome will use L1T3.
-
-			let nextRid = 1;
-			let maxTemporalLayers = 1;
-
-			for (const encoding of encodings)
-			{
-				const temporalLayers = encoding.scalabilityMode
-					? parseScalabilityMode(encoding.scalabilityMode).temporalLayers
-					: 3;
-
-				if (temporalLayers > maxTemporalLayers)
-				{
-					maxTemporalLayers = temporalLayers;
-				}
-			}
-
-			for (const encoding of encodings)
-			{
-				encoding.rid = `r${nextRid++}`;
-				encoding.scalabilityMode = `L1T${maxTemporalLayers}`;
-			}
 		}
 
 		const sendingRtpParameters: RtpParameters =
@@ -410,6 +383,35 @@ export class Chrome111 extends HandlerInterface
 		else
 		{
 			sendingRtpParameters.encodings = encodings;
+		}
+
+		// If we tried to set the scalabilityMode before,
+		// for some reason chrome is not respecting the bitrate
+		if (
+			sendingRtpParameters.encodings.length > 1
+		)
+		{
+			// NOTE: Even if WebRTC allows different scalabilityMode (different number
+			// of temporal layers) per simulcast stream, we need that those are the
+			// same in all them, so let's pick up the highest value.
+			// NOTE: If scalabilityMode is not given, Chrome will use L1T3.
+			let maxTemporalLayers = 1;
+			for (const encoding of sendingRtpParameters.encodings)
+			{
+				const temporalLayers = encoding.scalabilityMode
+					? parseScalabilityMode(encoding.scalabilityMode).temporalLayers
+					: 3;
+
+				if (temporalLayers > maxTemporalLayers)
+				{
+					maxTemporalLayers = temporalLayers;
+				}
+			}
+
+			for (const encoding of sendingRtpParameters.encodings)
+			{
+				encoding.scalabilityMode = `L1T${maxTemporalLayers}`;
+			}
 		}
 
 		this._remoteSdp!.send(
