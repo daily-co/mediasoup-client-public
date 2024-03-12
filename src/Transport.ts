@@ -642,7 +642,7 @@ export class Transport extends EnhancedEventEmitter<TransportEvents>
 				}
 				catch (error)
 				{
-					this._handler.stopSending(localId)
+					await this._handler.stopSending(localId)
 						.catch(() => {});
 
 					throw error;
