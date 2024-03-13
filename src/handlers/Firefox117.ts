@@ -115,7 +115,8 @@ export class Firefox117 extends HandlerInterface
 				{ rid: 'r0', maxBitrate: 100000 },
 				{ rid: 'r1', maxBitrate: 500000 }
 			];
-			const videoTransceiver = pc.addTransceiver(fakeVideoTrack, {
+
+			pc.addTransceiver(fakeVideoTrack, {
 				direction     : 'sendrecv',
 				sendEncodings : encodings
 			});
