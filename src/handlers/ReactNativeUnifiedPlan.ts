@@ -403,7 +403,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		// one if just a single encoding has been given.
 		else if (encodings.length === 1)
 		{
-			let newEncodings =
+			const newEncodings =
 				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
 
 			Object.assign(newEncodings[0], encodings[0]);
@@ -411,21 +411,19 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 			sendingRtpParameters.encodings = newEncodings;
 		}
 		// Otherwise if more than 1 encoding are given use them verbatim.
+		else if (isIOS)
+		{
+			sendingRtpParameters.encodings =
+				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
+			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
+			{
+				if (encodings[idx])
+					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
+			}
+		}
 		else
 		{
-			if (isIOS)
-			{
-				sendingRtpParameters.encodings =
-					sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
-				for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
-				{
-					if (encodings[idx])
-						Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
-				}
-			}
-			else {
-				sendingRtpParameters.encodings = encodings;
-			}
+			sendingRtpParameters.encodings = encodings;
 		}
 
 		// If VP8 or H264 and there is effective simulcast, add scalabilityMode to
@@ -469,8 +467,10 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		await this._pc.setRemoteDescription(answer);
 
-		// We can now get the transceiver.mid. That is only possible after the negotiation is completed
-		// More details here: https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpTransceiver/mid
+		// We can now get the transceiver.mid. That is only possible after the
+		// negotiation is completed.
+		// More details here:
+		//   https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpTransceiver/mid
 		const localId = transceiver.mid;
 
 		// Store in the map.
