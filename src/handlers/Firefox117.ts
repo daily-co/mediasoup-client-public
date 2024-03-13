@@ -525,13 +525,9 @@ export class Firefox117 extends HandlerInterface
 		transceiver.direction = 'inactive';
 		this._remoteSdp!.pauseMediaSection(localId);
 
-		const offer = await this._pc.createOffer();
-
-		logger.debug(
-			'pauseSending() | calling pc.setLocalDescription() [offer:%o]',
-			offer);
-
-		await this._pc.setLocalDescription(offer);
+		// START DEVIATION FROM FIREFOX 60
+		logger.debug('[Daily modification] skipping creating new offer on pauseSending(), since Firefox would change the top 2 layer ssrcs from original offer, breaking simulcast');
+		// END DEVIATION FROM FIREFOX 60
 
 		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
 
@@ -557,13 +553,9 @@ export class Firefox117 extends HandlerInterface
 		transceiver.direction = 'sendonly';
 		this._remoteSdp!.resumeSendingMediaSection(localId);
 
-		const offer = await this._pc.createOffer();
-
-		logger.debug(
-			'resumeSending() | calling pc.setLocalDescription() [offer:%o]',
-			offer);
-
-		await this._pc.setLocalDescription(offer);
+		// START DEVIATION FROM FIREFOX 60
+		logger.debug('[Daily modification] skipping creating new offer on resumeSending(), since Firefox would change the top 2 layer ssrcs from original offer, breaking simulcast');
+		// END DEVIATION FROM FIREFOX 60
 
 		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
 
