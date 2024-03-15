@@ -1,5 +1,6 @@
 import * as sdpTransform from 'sdp-transform';
 import { Logger } from '../Logger';
+import { UnsupportedError } from '../errors';
 import * as utils from '../utils';
 import * as ortc from '../ortc';
 import * as sdpCommonUtils from './sdp/commonUtils';
@@ -20,18 +21,14 @@ import {
 import { RemoteSdp } from './sdp/RemoteSdp';
 import { parse as parseScalabilityMode } from '../scalabilityModes';
 import { IceParameters, DtlsRole } from '../Transport';
-import {
-	RtpCapabilities,
-	RtpParameters,
-	RtpEncodingParameters
-} from '../RtpParameters';
+import { RtpCapabilities, RtpParameters } from '../RtpParameters';
 import { SctpCapabilities, SctpStreamParameters } from '../SctpParameters';
 
-const logger = new Logger('ReactNativeUnifiedPlan');
+const logger = new Logger('Firefox117');
 
-const SCTP_NUM_STREAMS = { OS: 1024, MIS: 1024 };
+const SCTP_NUM_STREAMS = { OS: 16, MIS: 2048 };
 
-export class ReactNativeUnifiedPlan extends HandlerInterface
+export class Firefox117 extends HandlerInterface
 {
 	// Handler direction.
 	private _direction?: 'send' | 'recv';
@@ -42,9 +39,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 	// Generic sending RTP parameters for audio and video suitable for the SDP
 	// remote answer.
 	private _sendingRemoteRtpParametersByKind?: { [key: string]: RtpParameters };
-	// Initial server side DTLS role. If not 'auto', it will force the opposite
-	// value in client side.
-	private _forcedLocalDtlsRole?: DtlsRole;
 	// RTCPeerConnection instance.
 	private _pc: any;
 	// Map of RTCTransceivers indexed by MID.
@@ -64,7 +58,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 	 */
 	static createFactory(): HandlerFactory
 	{
-		return (): ReactNativeUnifiedPlan => new ReactNativeUnifiedPlan();
+		return (): Firefox117 => new Firefox117();
 	}
 
 	constructor()
@@ -74,17 +68,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 	get name(): string
 	{
-		return 'ReactNativeUnifiedPlan';
+		return 'Firefox117';
 	}
 
 	close(): void
 	{
 		logger.debug('close()');
-
-		// Free/dispose native MediaStream but DO NOT free/dispose native
-		// MediaStreamTracks (that is parent's business).
-		// @ts-ignore (proprietary API in react-native-webrtc).
-		this._sendStream.release(/* releaseTracks */ false);
 
 		// Close RTCPeerConnection.
 		if (this._pc)
@@ -105,16 +94,41 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 				iceServers         : [],
 				iceTransportPolicy : 'all',
 				bundlePolicy       : 'max-bundle',
-				rtcpMuxPolicy      : 'require',
-				sdpSemantics       : 'unified-plan'
+				rtcpMuxPolicy      : 'require'
 			});
+
+		// NOTE: We need to add a real video track to get the RID extension mapping.
+		const canvas = document.createElement('canvas');
+
+		// NOTE: Otherwise Firefox fails in next line.
+		canvas.getContext('2d');
+
+		const fakeStream = (canvas as any).captureStream();
+		const fakeVideoTrack = fakeStream.getVideoTracks()[0];
 
 		try
 		{
-			pc.addTransceiver('audio');
-			pc.addTransceiver('video');
+			pc.addTransceiver('audio', { direction: 'sendrecv' });
+
+			// START DEVIATION FROM FIREFOX 60
+			const encodings = [
+				{ rid: 'r0', maxBitrate: 100000 },
+				{ rid: 'r1', maxBitrate: 500000 }
+			];
+
+			pc.addTransceiver(fakeVideoTrack, {
+				direction     : 'sendrecv',
+				sendEncodings : encodings
+			});
+			// END DEVIATION FROM FIREFOX 60
 
 			const offer = await pc.createOffer();
+
+			try { canvas.remove(); }
+			catch (error) {}
+
+			try { fakeVideoTrack.stop(); }
+			catch (error) {}
 
 			try { pc.close(); }
 			catch (error) {}
@@ -127,6 +141,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		}
 		catch (error)
 		{
+			try { canvas.remove(); }
+			catch (error2) {}
+
+			try { fakeVideoTrack.stop(); }
+			catch (error2) {}
+
 			try { pc.close(); }
 			catch (error2) {}
 
@@ -182,20 +202,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 			video : ortc.getSendingRemoteRtpParameters('video', extendedRtpCapabilities)
 		};
 
-		if (dtlsParameters.role && dtlsParameters.role !== 'auto')
-		{
-			this._forcedLocalDtlsRole = dtlsParameters.role === 'server'
-				? 'client'
-				: 'server';
-		}
-
 		this._pc = new (RTCPeerConnection as any)(
 			{
 				iceServers         : iceServers || [],
 				iceTransportPolicy : iceTransportPolicy || 'all',
 				bundlePolicy       : 'max-bundle',
 				rtcpMuxPolicy      : 'require',
-				sdpSemantics       : 'unified-plan',
 				...additionalSettings
 			},
 			proprietaryConstraints);
@@ -237,15 +249,11 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		}
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async updateIceServers(iceServers: RTCIceServer[]): Promise<void>
 	{
-		logger.debug('updateIceServers()');
-
-		const configuration = this._pc.getConfiguration();
-
-		configuration.iceServers = iceServers;
-
-		this._pc.setConfiguration(configuration);
+		// NOTE: Firefox does not implement pc.setConfiguration().
+		throw new UnsupportedError('not supported');
 	}
 
 	async restartIce(iceParameters: IceParameters): Promise<void>
@@ -309,21 +317,20 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		logger.debug('send() [kind:%s, track.id:%s]', track.kind, track.id);
 
-		// Mediasoup currently has no dependency on React Native.
-		// And this is supposed to be a temporary fix, until the Mediasoup bug is fixed.
-		// Opened issue, Unable to send video from iOS:
-		// https://github.com/versatica/mediasoup-client/issues/251
-		// @ts-ignore
-		const isIOS = window?.DailyNativeUtils?.platform?.OS === 'ios';
-
-		logger.debug('isIOS', isIOS);
-
-		if (!isIOS && encodings && encodings.length > 1)
+		if (encodings)
 		{
-			encodings.forEach((encoding: RtpEncodingParameters, idx: number) =>
+			encodings = utils.clone(encodings, []);
+
+			if (encodings!.length > 1)
 			{
-				encoding.rid = `r${idx}`;
-			});
+				encodings!.forEach((encoding, idx) =>
+				{
+					encoding.rid = `r${idx}`;
+				});
+
+				// START DEVIATION FROM FIREFOX 60
+				// END DEVIATION FROM FIREFOX 60
+			}
 		}
 
 		const sendingRtpParameters =
@@ -340,45 +347,29 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		sendingRemoteRtpParameters.codecs =
 			ortc.reduceCodecs(sendingRemoteRtpParameters.codecs, codec);
 
-		const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
-		const transceiver = this._pc.addTransceiver(
-			track,
-			{
-				direction     : 'sendonly',
-				streams       : [ this._sendStream ],
-				sendEncodings : !isIOS ? encodings : undefined
-			});
-		let offer = await this._pc.createOffer();
-		let localSdpObject = sdpTransform.parse(offer.sdp);
-		let offerMediaObject;
+		// NOTE: Firefox fails sometimes to properly anticipate the closed media
+		// section that it should use, so don't reuse closed media sections.
+		//	 https://github.com/versatica/mediasoup-client/issues/104
+		//
+		// const mediaSectionIdx = this._remoteSdp!.getNextMediaSectionIdx();
+		// START DEVIATION FROM FIREFOX 60
+		const transceiver = this._pc.addTransceiver(track, {
+			direction     : 'sendonly',
+			streams       : [ this._sendStream ],
+			sendEncodings : encodings
+		});
+		// END DEVIATION FROM FIREFOX 60
 
+		const offer = await this._pc.createOffer();
+		let localSdpObject = sdpTransform.parse(offer.sdp);
+
+		// In Firefox use DTLS role client even if we are the "offerer" since
+		// Firefox does not respect ICE-Lite.
 		if (!this._transportReady)
-		{
-			await this.setupTransport(
-				{
-					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
-					localSdpObject
-				});
-		}
+			await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 
 		const layers =
 			parseScalabilityMode((encodings || [ {} ])[0].scalabilityMode);
-
-		if (isIOS && encodings && encodings.length > 1)
-		{
-			logger.debug('send() | enabling legacy simulcast');
-
-			localSdpObject = sdpTransform.parse(offer.sdp);
-			offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
-
-			sdpUnifiedPlanUtils.addLegacySimulcast(
-				{
-					offerMediaObject,
-					numStreams : encodings.length
-				});
-
-			offer = { type: 'offer', sdp: sdpTransform.write(localSdpObject) };
-		}
 
 		logger.debug(
 			'send() | calling pc.setLocalDescription() [offer:%o]',
@@ -386,8 +377,15 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		await this._pc.setLocalDescription(offer);
 
+		// We can now get the transceiver.mid.
+		const localId = transceiver.mid;
+
+		// Set MID.
+		sendingRtpParameters.mid = localId;
+
 		localSdpObject = sdpTransform.parse(this._pc.localDescription.sdp);
-		offerMediaObject = localSdpObject.media[mediaSectionIdx.idx];
+
+		const offerMediaObject = localSdpObject.media[localSdpObject.media.length - 1];
 
 		// Set RTCP CNAME.
 		sendingRtpParameters.rtcp.cname =
@@ -410,21 +408,13 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 			sendingRtpParameters.encodings = newEncodings;
 		}
+		// START DEVIATION FROM FIREFOX 60
 		// Otherwise if more than 1 encoding are given use them verbatim.
-		else if (isIOS)
-		{
-			sendingRtpParameters.encodings =
-				sdpUnifiedPlanUtils.getRtpEncodings({ offerMediaObject });
-			for (let idx = 0; idx < sendingRtpParameters.encodings.length; ++idx)
-			{
-				if (encodings[idx])
-					Object.assign(sendingRtpParameters.encodings[idx], encodings[idx]);
-			}
-		}
 		else
 		{
 			sendingRtpParameters.encodings = encodings;
 		}
+		// END DEVIATION FROM FIREFOX 60
 
 		// If VP8 or H264 and there is effective simulcast, add scalabilityMode to
 		// each encoding.
@@ -452,7 +442,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		this._remoteSdp!.send(
 			{
 				offerMediaObject,
-				reuseMid            : mediaSectionIdx.reuseMid,
 				offerRtpParameters  : sendingRtpParameters,
 				answerRtpParameters : sendingRemoteRtpParameters,
 				codecOptions,
@@ -467,12 +456,6 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		await this._pc.setRemoteDescription(answer);
 
-		// We can now get the transceiver.mid. That is only possible after the
-		// negotiation is completed.
-		// More details here:
-		//   https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpTransceiver/mid
-		const localId = transceiver.mid;
-
 		// Store in the map.
 		this._mapMidTransceiver.set(localId, transceiver);
 
@@ -485,31 +468,29 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 	async stopSending(localId: string): Promise<void>
 	{
-		this.assertSendDirection();
-
 		logger.debug('stopSending() [localId:%s]', localId);
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
-			throw new Error('associated RTCRtpTransceiver not found');
+			throw new Error('associated transceiver not found');
 
 		transceiver.sender.replaceTrack(null);
 
+		// NOTE: Cannot use stop() the transceiver due to the the note above in
+		// send() method.
+		// try
+		// {
+		// 	transceiver.stop();
+		// }
+		// catch (error)
+		// {}
+
 		this._pc.removeTrack(transceiver.sender);
-
-		const mediaSectionClosed =
-			this._remoteSdp!.closeMediaSection(transceiver.mid!);
-
-		if (mediaSectionClosed)
-		{
-			try
-			{
-				transceiver.stop();
-			}
-			catch (error)
-			{}
-		}
+		// NOTE: Cannot use closeMediaSection() due to the the note above in send()
+		// method.
+		// this._remoteSdp!.closeMediaSection(transceiver.mid);
+		this._remoteSdp!.disableMediaSection(transceiver.mid!);
 
 		const offer = await this._pc.createOffer();
 
@@ -530,6 +511,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		this._mapMidTransceiver.delete(localId);
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async pauseSending(localId: string): Promise<void>
 	{
 		this.assertSendDirection();
@@ -544,13 +526,9 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		transceiver.direction = 'inactive';
 		this._remoteSdp!.pauseMediaSection(localId);
 
-		const offer = await this._pc.createOffer();
-
-		logger.debug(
-			'pauseSending() | calling pc.setLocalDescription() [offer:%o]',
-			offer);
-
-		await this._pc.setLocalDescription(offer);
+		// START DEVIATION FROM FIREFOX 60
+		logger.debug('[Daily modification] skipping creating new offer on pauseSending(), since Firefox would change the top 2 layer ssrcs from original offer, breaking simulcast');
+		// END DEVIATION FROM FIREFOX 60
 
 		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
 
@@ -561,6 +539,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		await this._pc.setRemoteDescription(answer);
 	}
 
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	async resumeSending(localId: string): Promise<void>
 	{
 		this.assertSendDirection();
@@ -569,20 +548,15 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 
 		const transceiver = this._mapMidTransceiver.get(localId);
 
-		this._remoteSdp!.resumeSendingMediaSection(localId);
-
 		if (!transceiver)
 			throw new Error('associated RTCRtpTransceiver not found');
 
 		transceiver.direction = 'sendonly';
+		this._remoteSdp!.resumeSendingMediaSection(localId);
 
-		const offer = await this._pc.createOffer();
-
-		logger.debug(
-			'resumeSending() | calling pc.setLocalDescription() [offer:%o]',
-			offer);
-
-		await this._pc.setLocalDescription(offer);
+		// START DEVIATION FROM FIREFOX 60
+		logger.debug('[Daily modification] skipping creating new offer on resumeSending(), since Firefox would change the top 2 layer ssrcs from original offer, breaking simulcast');
+		// END DEVIATION FROM FIREFOX 60
 
 		const answer = { type: 'answer', sdp: this._remoteSdp!.getSdp() };
 
@@ -628,9 +602,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 		const transceiver = this._mapMidTransceiver.get(localId);
 
 		if (!transceiver)
-			throw new Error('associated RTCRtpTransceiver not found');
+			throw new Error('associated transceiver not found');
 
 		const parameters = transceiver.sender.getParameters();
+
+		// START DEVIATION FROM FIREFOX 60
+		// END DEVIATION FROM FIREFOX 60
 
 		parameters.encodings.forEach((encoding: RTCRtpEncodingParameters, idx: number) =>
 		{
@@ -754,13 +731,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 				.find((m: any) => m.type === 'application');
 
 			if (!this._transportReady)
-			{
-				await this.setupTransport(
-					{
-						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
-						localSdpObject
-					});
-			}
+				await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 
 			logger.debug(
 				'sendDataChannel() | calling pc.setLocalDescription() [offer:%o]',
@@ -793,6 +764,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 	}
 
 	async receive(
+		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		optionsList: HandlerReceiveOptions[]
 	) : Promise<HandlerReceiveResult[]>
 	{
@@ -846,18 +818,12 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 					offerRtpParameters : rtpParameters,
 					answerMediaObject
 				});
-		}
 
-		answer = { type: 'answer', sdp: sdpTransform.write(localSdpObject) };
+			answer = { type: 'answer', sdp: sdpTransform.write(localSdpObject) };
+		}
 
 		if (!this._transportReady)
-		{
-			await this.setupTransport(
-				{
-					localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
-					localSdpObject
-				});
-		}
+			await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 
 		logger.debug(
 			'receive() | calling pc.setLocalDescription() [answer:%o]',
@@ -873,20 +839,16 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 				.find((t: RTCRtpTransceiver) => t.mid === localId);
 
 			if (!transceiver)
-			{
 				throw new Error('new RTCRtpTransceiver not found');
-			}
-			else
-			{
-				// Store in the map.
-				this._mapMidTransceiver.set(localId, transceiver);
 
-				results.push({
-					localId,
-					track       : transceiver.receiver.track,
-					rtpReceiver : transceiver.receiver
-				});
-			}
+			// Store in the map.
+			this._mapMidTransceiver.set(localId, transceiver);
+
+			results.push({
+				localId,
+				track       : transceiver.receiver.track,
+				rtpReceiver : transceiver.receiver
+			});
 		}
 
 		return results;
@@ -1057,11 +1019,7 @@ export class ReactNativeUnifiedPlan extends HandlerInterface
 			{
 				const localSdpObject = sdpTransform.parse(answer.sdp);
 
-				await this.setupTransport(
-					{
-						localDtlsRole : this._forcedLocalDtlsRole ?? 'client',
-						localSdpObject
-					});
+				await this.setupTransport({ localDtlsRole: 'client', localSdpObject });
 			}
 
 			logger.debug(
